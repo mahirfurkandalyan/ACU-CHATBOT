@@ -9,4 +9,7 @@ urlpatterns = [
     path('api/chat/', views.chat_api, name='chat_api'),
     path('api/search/', views.search_api, name='search_api'),
     path('api/feedback/', views.feedback_api, name='feedback_api'),
+    path('api/session/new/', views.new_session_api, name='new_session_api'),
+    path('api/session/clear/', views.clear_sessions_api, name='clear_sessions_api'),
+    path('api/session/<uuid:session_id>/delete/', views.delete_session_api, name='delete_session_api'),
 ]

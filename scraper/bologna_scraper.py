@@ -28,6 +28,9 @@ import time
 import logging
 import argparse
 import django
+from urllib.parse import urljoin, urlparse, parse_qs
+
+import requests
 
 # ── Django kurulumu ────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,9 +69,13 @@ except ImportError as e:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BOLOGNA_BASE = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx"
+BOLOGNA_ROOT = "https://obs.acibadem.edu.tr/oibs/bologna/"
 PAGE_WAIT    = 15   # saniye – eleman bekleme limiti
 CLICK_DELAY  = 1.5  # tıklama sonrası bekleme
 SCROLL_PAUSE = 0.8
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ACU-ChatBot-Bologna-Scraper/1.0)"
+}
 
 # Menü yapısı: (menü metni, kategori, dil-bağımsız anahtar)
 MENU_STRUCTURE = {
@@ -136,6 +143,58 @@ MENU_STRUCTURE = {
     },
 }
 
+ACADEMIC_TYPE_MAP = {
+    "tr": {
+        "Ön Lisans": "myo",
+        "Lisans": "lis",
+        "Yüksek Lisans": "yls",
+        "Doktora": "dok",
+    },
+    "en": {
+        "Associate Degree": "myo",
+        "Bachelor's Degree": "lis",
+        "Master's Degree": "yls",
+        "PhD": "dok",
+    },
+}
+
+DYN_PAGE_MAP = {
+    "tr": {
+        "Yönetim": 100,
+        "Üniversite Hakkında": 101,
+        "Bologna Komisyonu": 102,
+        "İletişim": 103,
+        "AKTS Kataloğu": 104,
+        "Şehir Hakkında": 300,
+        "Kampüs": 301,
+        "Yemek": 302,
+        "Sağlık Hizmetleri": 303,
+        "Spor ve Sosyal Yaşam": 304,
+        "Öğrenci Kulüpleri": 305,
+        "Konaklama": 309,
+        "Engelli Öğrenci Hizmetleri": 311,
+        "Erasmus+ Beyannamesi": 401,
+        "Bologna Süreci": 400,
+    },
+    "en": {
+        "Management": 100,
+        "About University": 101,
+        "Bologna Commission": 102,
+        "Contact": 103,
+        "ECTS Catalogue": 104,
+        "About the City": 300,
+        "Campus": 301,
+        "Food": 302,
+        "Health Services": 303,
+        "Sports and Social Life": 304,
+        "Student Clubs": 305,
+        "Accommodation": 309,
+        "Disabled Student Services": 311,
+        "Erasmus+ Charter": 401,
+        "Bologna Process": 400,
+    },
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Driver
@@ -153,6 +212,12 @@ def build_driver() -> webdriver.Chrome:
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
+    # Selenium Manager'ı öncele; çoğu modern kurulumda driver'ı kendisi çözer.
+    try:
+        return webdriver.Chrome(options=opts)
+    except Exception as exc:
+        log.warning("Yerel Selenium Manager ile Chrome açılamadı: %s", exc)
+
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         service = Service(ChromeDriverManager().install())
@@ -431,6 +496,144 @@ def scrape_info_page(driver, page_name: str, category: str, lang: str) -> int:
     return 1
 
 
+def fetch_soup(url: str) -> BeautifulSoup | None:
+    try:
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "html.parser")
+    except requests.RequestException as exc:
+        log.warning("OBS sayfası alınamadı: %s – %s", url, exc)
+        return None
+
+
+def soup_text(soup: BeautifulSoup) -> str:
+    for tag in soup.find_all(["script", "style", "noscript"]):
+        tag.decompose()
+    return clean_text((soup.find("body") or soup).get_text(separator=" "))
+
+
+def parse_program_links(level_code: str, lang: str) -> list[dict]:
+    url = f"{BOLOGNA_ROOT}unitSelection.aspx?type={level_code}&lang={lang}"
+    soup = fetch_soup(url)
+    if not soup:
+        return []
+
+    programs = []
+    for panel in soup.select("div.panel"):
+        heading = panel.select_one(".panel-title")
+        faculty_name = clean_text(heading.get_text(" ")) if heading else "Bilinmeyen Fakülte"
+        for link in panel.select("ul.list-group li a[href*='curOp=showPac']"):
+            href = urljoin(url, link.get("href"))
+            program_name = clean_text(link.get_text(" "))
+            query = parse_qs(urlparse(href).query)
+            cur_sunit = query.get("curSunit", [""])[0]
+            if not program_name or not cur_sunit:
+                continue
+            programs.append(
+                {
+                    "faculty_name": faculty_name,
+                    "program_name": program_name,
+                    "cur_sunit": cur_sunit,
+                    "program_url": href,
+                }
+            )
+    return programs
+
+
+def scrape_program_requests(program: dict, level_text: str, lang: str) -> int:
+    saved = 0
+    faculty, _ = Faculty.objects.get_or_create(
+        name=program["faculty_name"],
+        defaults={"url": program["program_url"]},
+    )
+    department, _ = Department.objects.get_or_create(
+        faculty=faculty,
+        name=program["program_name"],
+        defaults={"url": program["program_url"]},
+    )
+
+    about_url = f"{BOLOGNA_ROOT}progAbout.aspx?lang={lang}&curSunit={program['cur_sunit']}"
+    about_soup = fetch_soup(about_url)
+    if about_soup:
+        text = soup_text(about_soup)
+        if text:
+            save_content(f"Program Hakkında – {program['program_name']}", text, about_url, "academic")
+            saved += 1
+
+    officials_url = f"{BOLOGNA_ROOT}progOfficials.aspx?lang={lang}&curSunit={program['cur_sunit']}"
+    officials_soup = fetch_soup(officials_url)
+    if officials_soup:
+        text = soup_text(officials_soup)
+        if text:
+            save_content(f"Program Yetkilileri – {program['program_name']}", text, officials_url, "faculty")
+            saved += 1
+
+    staff_url = f"{BOLOGNA_ROOT}progAcademicStaff.aspx?lang={lang}&curSunit={program['cur_sunit']}"
+    staff_soup = fetch_soup(staff_url)
+    if staff_soup:
+        text = soup_text(staff_soup)
+        if text:
+            save_content(f"Akademik Personel – {program['program_name']}", text, staff_url, "faculty")
+            saved += 1
+
+    courses_url = f"{BOLOGNA_ROOT}progCourses.aspx?lang={lang}&curSunit={program['cur_sunit']}"
+    courses_soup = fetch_soup(courses_url)
+    if not courses_soup:
+        return saved
+
+    course_lines = []
+    current_semester = ""
+    for table in courses_soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 3:
+            continue
+        for row in rows:
+            cells = [clean_text(cell.get_text(" ")) for cell in row.find_all(["td", "th"])]
+            cells = [cell for cell in cells if cell]
+            if not cells:
+                continue
+            if len(cells) == 1 and "Ders Planı" in cells[0]:
+                current_semester = cells[0]
+                continue
+            if "Ders Kodu" in " ".join(cells):
+                continue
+            if len(cells) >= 6:
+                code = cells[0]
+                name = cells[1]
+                t_u_l = cells[2] if len(cells) > 2 else ""
+                course_type = cells[3] if len(cells) > 3 else ""
+                akts = cells[4] if len(cells) > 4 else ""
+                teaching_mode = cells[6] if len(cells) > 6 else ""
+                credits = int(akts) if akts.isdigit() else None
+
+                Course.objects.update_or_create(
+                    code=code,
+                    name=name,
+                    defaults={
+                        "department": department,
+                        "description": f"T+U+L: {t_u_l} | Tür: {course_type} | Öğretim Şekli: {teaching_mode}",
+                        "credits": credits,
+                        "semester": current_semester,
+                        "url": courses_url,
+                    },
+                )
+                course_lines.append(
+                    f"Dönem: {current_semester} | Kod: {code} | Ders: {name} | T+U+L: {t_u_l} | Tür: {course_type} | AKTS: {akts} | Öğretim Şekli: {teaching_mode}"
+                )
+
+    if course_lines:
+        save_content(
+            f"Ders Listesi – {program['program_name']}",
+            "\n".join(course_lines),
+            courses_url,
+            "course",
+        )
+        saved += 1
+        log.info("Program işlendi: %s (%d ders)", program["program_name"], len(course_lines))
+
+    return saved
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Ana çalıştırıcı
 # ─────────────────────────────────────────────────────────────────────────────
@@ -443,71 +646,42 @@ def run_bologna_scraper(lang: str = "tr") -> int:
     url = f"{BOLOGNA_BASE}?lang={lang}"
     log.info("Bologna OBS scraper başlatılıyor → %s", url)
 
-    driver = build_driver()
     total  = 0
-    start  = __import__("time").time()
+    start  = time.time()
 
     try:
-        driver.get(url)
-        time.sleep(3)   # ilk yüklenme
-
         menu = MENU_STRUCTURE.get(lang, MENU_STRUCTURE["tr"])
 
-        # ── 1. Kurumsal bilgiler ──────────────────────────────────────────
-        log.info("─── Kurumsal Bilgiler ───")
-        for page_name, category in menu["kurumsal"]:
-            driver.get(url)       # sayfayı sıfırla
-            time.sleep(1.5)
-            # Ana menüde "Kurumsal Bilgiler" hover/tıkla
-            click_menu_item(driver, "Kurumsal Bilgiler" if lang == "tr" else "Institutional Information")
-            time.sleep(0.8)
-            total += scrape_info_page(driver, page_name, category, lang)
+        log.info("─── OBS Bilgi Sayfaları ───")
+        info_sections = menu["kurumsal"] + menu["ogrenci"] + menu["erasmus"] + menu["bologna"]
+        for page_name, category in info_sections:
+            cur_page_id = DYN_PAGE_MAP.get(lang, DYN_PAGE_MAP["tr"]).get(page_name)
+            if not cur_page_id:
+                continue
+            info_url = f"{BOLOGNA_ROOT}dynConPage.aspx?curPageId={cur_page_id}&lang={lang}"
+            soup = fetch_soup(info_url)
+            if not soup:
+                continue
+            text = soup_text(soup)
+            if text:
+                save_content(page_name, text, info_url, category)
+                total += 1
 
-        # ── 2. Akademik birimler ──────────────────────────────────────────
-        log.info("─── Akademik Birimler ───")
+        log.info("─── OBS Akademik Birimler ───")
         for level_text, _ in menu["akademik"]:
-            driver.get(url)
-            time.sleep(1.5)
-            click_menu_item(driver, "Akademik Birimler" if lang == "tr" else "Academic Units")
-            time.sleep(0.8)
-            total += scrape_academic_level(driver, level_text, lang)
+            level_code = ACADEMIC_TYPE_MAP.get(lang, ACADEMIC_TYPE_MAP["tr"]).get(level_text)
+            if not level_code:
+                continue
+            programs = parse_program_links(level_code, lang)
+            log.info("%s için %d program bulundu.", level_text, len(programs))
+            for program in programs:
+                total += scrape_program_requests(program, level_text, lang)
 
-        # ── 3. Öğrenciler için genel bilgiler ────────────────────────────
-        log.info("─── Öğrenciler İçin Bilgiler ───")
-        for page_name, category in menu["ogrenci"]:
-            driver.get(url)
-            time.sleep(1.5)
-            click_menu_item(
-                driver,
-                "Öğrenciler İçin Genel Bilgiler" if lang == "tr" else "General Information for Students"
-            )
-            time.sleep(0.8)
-            total += scrape_info_page(driver, page_name, category, lang)
-
-        # ── 4. Erasmus ────────────────────────────────────────────────────
-        log.info("─── Erasmus ───")
-        for page_name, category in menu["erasmus"]:
-            driver.get(url)
-            time.sleep(1.5)
-            click_menu_item(driver, "Erasmus Beyannamesi" if lang == "tr" else "Erasmus Charter")
-            time.sleep(0.8)
-            total += scrape_info_page(driver, page_name, category, lang)
-
-        # ── 5. Bologna süreci ─────────────────────────────────────────────
-        log.info("─── Bologna Süreci ───")
-        for page_name, category in menu["bologna"]:
-            driver.get(url)
-            time.sleep(1.5)
-            click_menu_item(driver, "Bologna Süreci" if lang == "tr" else "Bologna Process")
-            time.sleep(0.8)
-            total += scrape_info_page(driver, page_name, category, lang)
-
-        # ── Log ───────────────────────────────────────────────────────────
         ScraperLog.objects.create(
             url=url,
             status="success" if total > 0 else "partial",
             records_saved=total,
-            duration_seconds=__import__("time").time() - start,
+            duration_seconds=time.time() - start,
         )
 
     except Exception as exc:
@@ -515,10 +689,8 @@ def run_bologna_scraper(lang: str = "tr") -> int:
         ScraperLog.objects.create(
             url=url, status="failed",
             error_message=str(exc),
-            duration_seconds=__import__("time").time() - start,
+            duration_seconds=time.time() - start,
         )
-    finally:
-        driver.quit()
 
     log.info("Bologna OBS tamamlandı. Toplam %d kayıt (%s).", total, lang.upper())
     return total

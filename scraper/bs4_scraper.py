@@ -134,7 +134,7 @@ def save_content(title: str, content: str, url: str, category: str = "other") ->
 # Sayfa ayrıştırıcıları
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_generic_page(soup: BeautifulSoup, url: str) -> int:
+def parse_generic_page(soup: BeautifulSoup, url: str, forced_category: str | None = None) -> int:
     """
     Genel sayfa ayrıştırıcısı.
     Ana içerik alanını (<main>, <article> veya .content sınıfını) bulur,
@@ -166,14 +166,14 @@ def parse_generic_page(soup: BeautifulSoup, url: str) -> int:
     text_parts = [p.get_text(separator=" ") for p in paragraphs if p.get_text(strip=True)]
     content = " ".join(text_parts)
 
-    category = url_to_category(url)
+    category = forced_category or url_to_category(url)
     if save_content(title, content, url, category):
         saved += 1
 
     return saved
 
 
-def parse_faculty_page(soup: BeautifulSoup, url: str) -> int:
+def parse_faculty_page(soup: BeautifulSoup, url: str, forced_category: str | None = None) -> int:
     """Fakülte sayfasından fakülte ve bölüm bilgilerini çeker."""
     saved = 0
 
@@ -200,7 +200,7 @@ def parse_faculty_page(soup: BeautifulSoup, url: str) -> int:
             )
 
     # Genel içerik de kaydet
-    saved += parse_generic_page(soup, url)
+    saved += parse_generic_page(soup, url, forced_category=forced_category or "faculty")
     return saved
 
 
@@ -210,39 +210,54 @@ def parse_faculty_page(soup: BeautifulSoup, url: str) -> int:
 
 # Taranacak URL listesi (kategori bilgisiyle birlikte)
 SEED_URLS = [
-    # Ana sayfa
-    (f"{BASE_URL}/tr", "other"),
+    # Ana sayfalar
+    (f"{BASE_URL}/", "other"),
     (f"{BASE_URL}/en", "other"),
 
-    # Hakkında
-    (f"{BASE_URL}/tr/kurumsal/hakkimizda", "other"),
+    # Üniversite / kurumsal
+    (f"{BASE_URL}/universite", "other"),
+    (f"{BASE_URL}/universite/rektorluge-bagli-birimler", "other"),
+    (f"{BASE_URL}/universite/merkezler-ve-kurullar/arastirma-merkezleri", "research"),
 
-    # Fakülteler
-    (f"{BASE_URL}/tr/akademik/fakulteler", "faculty"),
-    (f"{BASE_URL}/tr/akademik/fakulteler/tip-fakultesi", "faculty"),
-    (f"{BASE_URL}/tr/akademik/fakulteler/muhendislik-ve-dogal-bilimler-fakultesi", "faculty"),
-    (f"{BASE_URL}/tr/akademik/fakulteler/saglik-bilimleri-fakultesi", "faculty"),
-    (f"{BASE_URL}/tr/akademik/enstituler", "faculty"),
+    # Akademik
+    (f"{BASE_URL}/akademik", "academic"),
+    (f"{BASE_URL}/akademik/lisans", "academic"),
+    (f"{BASE_URL}/akademik/lisans/tip-fakultesi", "faculty"),
+    (f"{BASE_URL}/akademik/lisans/eczacilik-fakultesi/eczacilik-fakultesi", "faculty"),
+    (f"{BASE_URL}/akademik/lisans/saglik-bilimleri-fakultesi", "faculty"),
+    (f"{BASE_URL}/akademik/lisans/insan-ve-toplum-bilimleri-fakultesi/insan-ve-toplum-bilimleri-fakultesi", "faculty"),
+    (f"{BASE_URL}/akademik/lisans/muhendislik-ve-doga-bilimleri-fakultesi", "faculty"),
+    (f"{BASE_URL}/akademik/onlisans", "academic"),
+    (f"{BASE_URL}/akademik/onlisans/saglik-hizmetleri-meslek-yuksekokulu", "faculty"),
+    (f"{BASE_URL}/akademik/onlisans/meslek-yuksekokulu", "faculty"),
+    (f"{BASE_URL}/akademik/lisansustu", "academic"),
+    (f"{BASE_URL}/akademik/lisansustu/saglik-bilimleri-enstitusu", "faculty"),
+    (f"{BASE_URL}/akademik/lisansustu/sosyal-bilimler-enstitusu", "faculty"),
+    (f"{BASE_URL}/akademik/lisansustu/fen-bilimleri-enstitusu", "faculty"),
+    (f"{BASE_URL}/akademik/lisansustu/senoloji-arastirma-enstitusu", "faculty"),
+    (f"{BASE_URL}/akademik/ortak-dersler-bolumleri", "academic"),
+    (f"{BASE_URL}/akademik/ortak-dersler-bolumleri/yabanci-diller", "academic"),
 
-    # Lisans Programları
-    (f"{BASE_URL}/tr/akademik/lisans-programlari", "academic"),
-    (f"{BASE_URL}/tr/akademik/yuksek-lisans-ve-doktora-programlari", "academic"),
+    # Öğrenci / kampüs
+    (f"{BASE_URL}/ogrenci/ogrenci", "other"),
+    (f"{BASE_URL}/ogrenci/ogrenci-isleri/akademik-takvim", "admission"),
+    (f"{BASE_URL}/ogrenci/odeme-yontemleri", "admission"),
+    (f"{BASE_URL}/ogrenci/acuda-yasam", "campus"),
+    (f"{BASE_URL}/ogrenci/acuda-yasam/ogrenci-kulupleri", "campus"),
+    (f"{BASE_URL}/ogrenci/acuda-yasam/spor-merkezi", "campus"),
+    (f"{BASE_URL}/ogrenci/acuda-yasam/acibadem-mehmet-ali-aydinlar-universitesi-ogrenci-yurtlari/hakkinda", "campus"),
 
-    # Kampüs
-    (f"{BASE_URL}/tr/kampus-hayati", "campus"),
-    (f"{BASE_URL}/tr/kampus-hayati/tesisler", "campus"),
-    (f"{BASE_URL}/tr/kampus-hayati/yurtlar", "campus"),
+    # Aday öğrenci / kabul
+    (f"{BASE_URL}/aday/ogrenci", "admission"),
+    (f"{BASE_URL}/aday/ogrenci/egitim/burs/burs-olanaklari", "admission"),
+    (f"{BASE_URL}/aday/ogrenci/egitim/lisans/lisans-kontenjan-ve-puan-tablosu", "admission"),
 
-    # Kayıt
-    (f"{BASE_URL}/tr/ogrenci-kabul", "admission"),
-    (f"{BASE_URL}/tr/ogrenci-kabul/lisans-basvurusu", "admission"),
-    (f"{BASE_URL}/tr/ogrenci-kabul/yuksek-lisans-basvurusu", "admission"),
-
-    # Araştırma
-    (f"{BASE_URL}/tr/arastirma", "research"),
-
-    # İletişim
-    (f"{BASE_URL}/tr/iletisim", "contact"),
+    # Araştırma / haber / duyuru / etkinlik
+    (f"{BASE_URL}/arastirma", "research"),
+    (f"{BASE_URL}/arastirma/arastirmaci", "research"),
+    (f"{BASE_URL}/duyurular", "news"),
+    (f"{BASE_URL}/haberler", "news"),
+    (f"{BASE_URL}/etkinlikler", "news"),
 ]
 
 
@@ -264,10 +279,10 @@ def run_static_scraper():
             continue
 
         try:
-            if "fakult" in url.lower() or "faculty" in url.lower():
-                saved = parse_faculty_page(soup, url)
+            if forced_category == "faculty" or "fakult" in url.lower() or "faculty" in url.lower():
+                saved = parse_faculty_page(soup, url, forced_category=forced_category)
             else:
-                saved = parse_generic_page(soup, url)
+                saved = parse_generic_page(soup, url, forced_category=forced_category)
 
             total_saved += saved
             ScraperLog.objects.create(
